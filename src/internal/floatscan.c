@@ -69,44 +69,44 @@
  * Returns:
  *   The exponent value, or LLONG_MIN if no valid exponent was found
  */
-static long long scan_exponent(FILE *f, int partial_ok)
+static long long scan_exponent(FILE *f, int pok)
 {
-	int c;
+	int ch;
 	int exponent_int;           /* Exponent value as int (for overflow detection) */
 	long long exponent_result;  /* Final exponent value */
 	int is_negative = 0;
 
-	c = shgetc(f);
+	ch = shgetc(f);
 
 	/* Handle optional sign */
-	if (c == '+' || c == '-') {
-		is_negative = (c == '-');
-		c = shgetc(f);
+	if (ch == '+' || ch == '-') {
+		is_negative = (ch == '-');
+		ch = shgetc(f);
 		/* If partial parsing is OK and we don't find a digit, back up */
-		if (c - '0' >= 10U && partial_ok) {
+		if (ch - '0' >= 10U && pok) {
 			shunget(f);
 		}
 	}
 
 	/* Must have at least one digit */
-	if (c - '0' >= 10U) {
+	if (ch - '0' >= 10U) {
 		shunget(f);
 		return LLONG_MIN;  /* Signal: no valid exponent found */
 	}
 
 	/* Parse exponent, watching for overflow */
 	/* First phase: accumulate in int to detect overflow early */
-	for (exponent_int = 0; c - '0' < 10U && exponent_int < INT_MAX/10; c = shgetc(f)) {
-		exponent_int = 10 * exponent_int + (c - '0');
+	for (exponent_int = 0; ch - '0' < 10U && exponent_int < INT_MAX/10; ch = shgetc(f)) {
+		exponent_int = 10 * exponent_int + (ch - '0');
 	}
 
 	/* Second phase: continue in long long for larger values */
-	for (exponent_result = exponent_int; c - '0' < 10U && exponent_result < LLONG_MAX/100; c = shgetc(f)) {
-		exponent_result = 10 * exponent_result + (c - '0');
+	for (exponent_result = exponent_int; ch - '0' < 10U && exponent_result < LLONG_MAX/100; ch = shgetc(f)) {
+		exponent_result = 10 * exponent_result + (ch - '0');
 	}
 
 	/* Skip any remaining digits (they would cause overflow anyway) */
-	for (; c - '0' < 10U; c = shgetc(f)) {
+	for (; ch - '0' < 10U; ch = shgetc(f)) {
 		/* Just consume the digits */
 	}
 
@@ -128,22 +128,9 @@ static long long scan_exponent(FILE *f, int partial_ok)
  * 3. Scale the number to get the right number of significant bits
  * 4. Convert to target floating-point format with proper rounding
  *
- * Variable naming guide:
- * - x[]: billion-based digit array (each element holds up to 9 decimal digits)
- * - j: current position within a billion-based digit (0-8)
- * - k: current index in the x[] array
- * - a: start index of significant digits in x[] (circular buffer)
- * - z: end index of significant digits in x[] (circular buffer)
- * - dc: total decimal digit count
- * - lrp: logical radix position (position of decimal point)
- * - lnz: position of last non-zero digit
- * - rp: radix position in billion-based representation
- * - e2: binary exponent for final result
- * - e10: decimal exponent from 'e' notation
- *
  * Parameters:
  *   f: Input stream
- *   c: First character already read
+ *   ch: First character already read
  *   bits: Target precision in bits (24 for float, 53 for double, etc.)
  *   emin: Minimum exponent for target type
  *   sign: Sign of the number (+1 or -1)
@@ -152,16 +139,16 @@ static long long scan_exponent(FILE *f, int partial_ok)
  * Returns:
  *   The parsed floating-point value
  */
-static long double decfloat(FILE *f, int c, int bits, int emin, int sign, int pok)
+static long double decfloat(FILE *f, int ch, int bits, int emin, int sign, int pok)
 {
 	/* Billion-based digit array - each element holds up to 9 decimal digits */
-	uint32_t x[KMAX];
+	uint32_t digits[KMAX];
 
 	/* Threshold values for determining when we have enough precision */
-	static const uint32_t th[] = { LD_B1B_MAX };
+	static const uint32_t thresholds[] = { LD_B1B_MAX };
 
 	/* Loop counters and array indices */
-	int i, j, k, a, z;
+	int i, j, k, start, end;
 
 	/* Position tracking variables */
 	long long lrp = 0;    /* Logical radix position (decimal point position) */
@@ -178,7 +165,7 @@ static long double decfloat(FILE *f, int c, int bits, int emin, int sign, int po
 	int e2;               /* Binary exponent for final result */
 	int emax = -emin - bits + 3;  /* Maximum allowed exponent */
 	int denormal = 0;     /* Whether result will be denormal */
-	long double y;        /* Final result accumulator */
+	long double result;   /* Final result accumulator */
 	long double frac = 0; /* Fractional part for rounding */
 	long double bias = 0; /* Rounding bias */
 
@@ -188,28 +175,28 @@ static long double decfloat(FILE *f, int c, int bits, int emin, int sign, int po
 
 	/* Initialize parsing state */
 	j = 0;  /* Position within current billion-based digit (0-8) */
-	k = 0;  /* Current index in the x[] array */
+	k = 0;  /* Current index in the digits[] array */
 
 	/* Skip leading zeros - they don't consume buffer space */
-	for (; c == '0'; c = shgetc(f)) {
+	for (; ch == '0'; ch = shgetc(f)) {
 		gotdig = 1;
 	}
 
 	/* Handle leading zeros after decimal point */
-	if (c == '.') {
+	if (ch == '.') {
 		gotrad = 1;
-		for (c = shgetc(f); c == '0'; c = shgetc(f)) {
+		for (ch = shgetc(f); ch == '0'; ch = shgetc(f)) {
 			gotdig = 1;
 			lrp--;  /* Each leading zero moves radix left */
 		}
 	}
 
 	/* Initialize the billion-based digit array */
-	x[0] = 0;
+	digits[0] = 0;
 
 	/* Main digit parsing loop - collect digits into billion-based representation */
-	for (; (c - '0' < 10U) || c == '.'; c = shgetc(f)) {
-		if (c == '.') {
+	for (; (ch - '0' < 10U) || ch == '.'; ch = shgetc(f)) {
+		if (ch == '.') {
 			/* Handle decimal point */
 			if (gotrad) break;  /* Second decimal point - stop parsing */
 			gotrad = 1;
@@ -217,17 +204,17 @@ static long double decfloat(FILE *f, int c, int bits, int emin, int sign, int po
 		} else if (k < KMAX - 3) {
 			/* We have space in our buffer for more digits */
 			dc++;  /* Increment total digit count */
-			if (c != '0') {
+			if (ch != '0') {
 				lnz = dc;  /* Update position of last non-zero digit */
 			}
 
 			/* Add digit to current billion-based element */
 			if (j) {
 				/* Not the first digit in this element - multiply by 10 and add */
-				x[k] = x[k] * 10 + (c - '0');
+				digits[k] = digits[k] * 10 + (ch - '0');
 			} else {
 				/* First digit in this element */
-				x[k] = c - '0';
+				digits[k] = ch - '0';
 			}
 
 			/* Move to next billion-based element if current one is full (9 digits) */
@@ -239,9 +226,9 @@ static long double decfloat(FILE *f, int c, int bits, int emin, int sign, int po
 		} else {
 			/* Buffer is full - just track whether we have more non-zero digits */
 			dc++;
-			if (c != '0') {
+			if (ch != '0') {
 				lnz = (KMAX - 4) * 9;  /* Mark significant digits beyond our buffer */
-				x[KMAX - 4] |= 1;     /* Set a flag that we lost precision */
+				digits[KMAX - 4] |= 1;     /* Set a flag that we lost precision */
 			}
 		}
 	}
@@ -252,7 +239,7 @@ static long double decfloat(FILE *f, int c, int bits, int emin, int sign, int po
 	}
 
 	/* Parse optional exponent (e.g., "e123" or "E-45") */
-	if (gotdig && (c|32) == 'e') {
+	if (gotdig && (ch|32) == 'e') {
 		e10 = scan_exponent(f, pok);
 		if (e10 == LLONG_MIN) {
 			/* No valid exponent found */
@@ -265,7 +252,7 @@ static long double decfloat(FILE *f, int c, int bits, int emin, int sign, int po
 			e10 = 0;
 		}
 		lrp += e10;  /* Adjust logical radix position by exponent */
-	} else if (c >= 0) {
+	} else if (ch >= 0) {
 		shunget(f);  /* Put back the non-digit character */
 	}
 
@@ -277,13 +264,13 @@ static long double decfloat(FILE *f, int c, int bits, int emin, int sign, int po
 	}
 
 	/* Handle zero specially to avoid complex processing */
-	if (!x[0]) {
+	if (!digits[0]) {
 		return sign * 0.0;
 	}
 
 	/* Fast path for small integers without exponent */
-	if (lrp == dc && dc < 10 && (bits > 30 || x[0] >> bits == 0)) {
-		return sign * (long double)x[0];
+	if (lrp == dc && dc < 10 && (bits > 30 || digits[0] >> bits == 0)) {
+		return sign * (long double)digits[0];
 	}
 
 	/* Check for overflow/underflow */
@@ -299,34 +286,34 @@ static long double decfloat(FILE *f, int c, int bits, int emin, int sign, int po
 	/* Pad incomplete final billion-based digit with zeros */
 	if (j) {
 		for (; j < 9; j++) {
-			x[k] *= 10;
+			digits[k] *= 10;
 		}
 		k++;
 		j = 0;
 	}
 
 	/* Initialize working variables for precision conversion */
-	a = 0;      /* Start of valid data in circular buffer */
-	z = k;      /* End of valid data in circular buffer */
-	e2 = 0;     /* Binary exponent for final result */
-	rp = lrp;   /* Working copy of radix position */
+	start = 0;      /* Start of valid data in circular buffer */
+	end = k;        /* End of valid data in circular buffer */
+	e2 = 0;         /* Binary exponent for final result */
+	rp = lrp;       /* Working copy of radix position */
 
 	/* Fast path for small to mid-size integers (even with exponent notation) */
 	if (lnz < 9 && lnz <= rp && rp < 18) {
 		if (rp == 9) {
-			return sign * (long double)x[0];
+			return sign * (long double)digits[0];
 		}
 		if (rp < 9) {
-			return sign * (long double)x[0] / p10s[8 - rp];
+			return sign * (long double)digits[0] / p10s[8 - rp];
 		}
 		int bitlim = bits - 3 * (int)(rp - 9);
-		if (bitlim > 30 || x[0] >> bitlim == 0) {
-			return sign * (long double)x[0] * p10s[rp - 10];
+		if (bitlim > 30 || digits[0] >> bitlim == 0) {
+			return sign * (long double)digits[0] * p10s[rp - 10];
 		}
 	}
 
 	/* Remove trailing zero billion-based digits */
-	for (; !x[z - 1]; z--) {
+	for (; !digits[end - 1]; end--) {
 		/* Keep removing until we find a non-zero digit */
 	}
 
@@ -341,21 +328,21 @@ static long double decfloat(FILE *f, int c, int bits, int emin, int sign, int po
 		uint32_t carry = 0;
 
 		/* Divide all digits by the appropriate power of 10 */
-		for (k = a; k != z; k++) {
-			uint32_t tmp = x[k] % p10;
-			x[k] = x[k] / p10 + carry;
+		for (k = start; k != end; k++) {
+			uint32_t tmp = digits[k] % p10;
+			digits[k] = digits[k] / p10 + carry;
 			carry = 1000000000 / p10 * tmp;
 
 			/* If the leading digit becomes zero, advance the start pointer */
-			if (k == a && !x[k]) {
-				a = (a + 1) & MASK;
+			if (k == start && !digits[k]) {
+				start = (start + 1) & MASK;
 				rp -= 9;
 			}
 		}
 
 		/* If there's a carry, add a new digit */
 		if (carry) {
-			x[z++] = carry;
+			digits[end++] = carry;
 		}
 		rp += 9 - rpm9;
 	}
@@ -380,40 +367,40 @@ static long double decfloat(FILE *f, int c, int bits, int emin, int sign, int po
 	 *
 	 * The condition checks:
 	 * 1. rp < 9*LD_B1B_DIG: Not enough digits to the left of radix point
-	 * 2. rp == 9*LD_B1B_DIG && x[a]<th[0]: Exactly enough digits, but the leading
+	 * 2. rp == 9*LD_B1B_DIG && digits[start]<thresholds[0]: Exactly enough digits, but the leading
 	 *    digit is too small (less than the threshold for the target precision)
 	 */
-	while (rp < 9*LD_B1B_DIG || (rp == 9*LD_B1B_DIG && x[a] < th[0])) {
+	while (rp < 9*LD_B1B_DIG || (rp == 9*LD_B1B_DIG && digits[start] < thresholds[0])) {
 		uint32_t carry = 0;
 		e2 -= 29;  /* Adjust binary exponent for 2^29 scaling */
 
 		/* Multiply all digits by 2^29, working backwards through the array */
-		for (k = (z-1) & MASK; ; k = (k-1) & MASK) {
-			uint64_t tmp = ((uint64_t)x[k] << 29) + carry;
+		for (k = (end-1) & MASK; ; k = (k-1) & MASK) {
+			uint64_t tmp = ((uint64_t)digits[k] << 29) + carry;
 			if (tmp > 1000000000) {
 				carry = tmp / 1000000000;
-				x[k] = tmp % 1000000000;
+				digits[k] = tmp % 1000000000;
 			} else {
 				carry = 0;
-				x[k] = tmp;
+				digits[k] = tmp;
 			}
 			/* Remove trailing zeros that might have been created */
-			if (k == ((z-1) & MASK) && k != a && !x[k]) {
-				z = k;
+			if (k == ((end-1) & MASK) && k != start && !digits[k]) {
+				end = k;
 			}
-			if (k == a) break;  /* Processed all digits */
+			if (k == start) break;  /* Processed all digits */
 		}
 
 		/* If there's a carry, we need to add a new leading digit */
 		if (carry) {
 			rp += 9;  /* We now have 9 more digits to the left of radix point */
-			a = (a-1) & MASK;  /* Move start pointer back to make room */
-			if (a == z) {
+			start = (start-1) & MASK;  /* Move start pointer back to make room */
+			if (start == end) {
 				/* Buffer overflow - merge the last two digits */
-				z = (z-1) & MASK;
-				x[(z-1) & MASK] |= x[z];  /* Set a bit to indicate lost precision */
+				end = (end-1) & MASK;
+				digits[(end-1) & MASK] |= digits[end];  /* Set a bit to indicate lost precision */
 			}
-			x[a] = carry;  /* Store the new leading digit */
+			digits[start] = carry;  /* Store the new leading digit */
 		}
 	}
 
@@ -425,7 +412,7 @@ static long double decfloat(FILE *f, int c, int bits, int emin, int sign, int po
 	 * amount of precision for the target floating-point format.
 	 *
 	 * The algorithm compares our current leading digits with the threshold
-	 * values (th[]) to determine if we have the right magnitude.
+	 * values (thresholds[]) to determine if we have the right magnitude.
 	 */
 	for (;;) {
 		uint32_t carry = 0;
@@ -433,12 +420,12 @@ static long double decfloat(FILE *f, int c, int bits, int emin, int sign, int po
 
 		/* Check if we have the right magnitude by comparing with thresholds */
 		for (i = 0; i < LD_B1B_DIG; i++) {
-			k = (a + i) & MASK;
-			if (k == z || x[k] < th[i]) {
+			k = (start + i) & MASK;
+			if (k == end || digits[k] < thresholds[i]) {
 				i = LD_B1B_DIG;  /* Signal: magnitude is too small */
 				break;
 			}
-			if (x[(a + i) & MASK] > th[i]) break;  /* Magnitude is too large */
+			if (digits[(start + i) & MASK] > thresholds[i]) break;  /* Magnitude is too large */
 		}
 
 		/* If we have exactly the right magnitude and position, we're done */
@@ -451,14 +438,14 @@ static long double decfloat(FILE *f, int c, int bits, int emin, int sign, int po
 		e2 += sh;  /* Adjust binary exponent */
 
 		/* Divide all digits by 2^sh */
-		for (k = a; k != z; k = (k + 1) & MASK) {
-			uint32_t tmp = x[k] & ((1 << sh) - 1);  /* Bits that will be shifted out */
-			x[k] = (x[k] >> sh) + carry;
+		for (k = start; k != end; k = (k + 1) & MASK) {
+			uint32_t tmp = digits[k] & ((1 << sh) - 1);  /* Bits that will be shifted out */
+			digits[k] = (digits[k] >> sh) + carry;
 			carry = (1000000000 >> sh) * tmp;  /* Carry for next digit */
 
 			/* If leading digit becomes zero, advance start pointer */
-			if (k == a && !x[k]) {
-				a = (a + 1) & MASK;
+			if (k == start && !digits[k]) {
+				start = (start + 1) & MASK;
 				i--;
 				rp -= 9;
 			}
@@ -466,11 +453,11 @@ static long double decfloat(FILE *f, int c, int bits, int emin, int sign, int po
 
 		/* Handle any remaining carry */
 		if (carry) {
-			if (((z + 1) & MASK) != a) {
-				x[z] = carry;
-				z = (z + 1) & MASK;
+			if (((end + 1) & MASK) != start) {
+				digits[end] = carry;
+				end = (end + 1) & MASK;
 			} else {
-				x[(z - 1) & MASK] |= 1;  /* Set sticky bit for lost precision */
+				digits[(end - 1) & MASK] |= 1;  /* Set sticky bit for lost precision */
 			}
 		}
 	}
@@ -482,16 +469,16 @@ static long double decfloat(FILE *f, int c, int bits, int emin, int sign, int po
 	 * We take exactly LD_B1B_DIG billion-based digits and combine them
 	 * into a single long double value.
 	 */
-	for (y = i = 0; i < LD_B1B_DIG; i++) {
+	for (result = i = 0; i < LD_B1B_DIG; i++) {
 		/* If we run out of digits, pad with zeros */
-		if (((a + i) & MASK) == z) {
-			x[(z = ((z + 1) & MASK)) - 1] = 0;
+		if (((start + i) & MASK) == end) {
+			digits[(end = ((end + 1) & MASK)) - 1] = 0;
 		}
-		/* Accumulate: y = y * 10^9 + next_digit */
-		y = 1000000000.0L * y + x[(a + i) & MASK];
+		/* Accumulate: result = result * 10^9 + next_digit */
+		result = 1000000000.0L * result + digits[(start + i) & MASK];
 	}
 
-	y *= sign;  /* Apply the sign */
+	result *= sign;  /* Apply the sign */
 
 	/*
 	 * Handle denormal numbers
@@ -513,10 +500,10 @@ static long double decfloat(FILE *f, int c, int bits, int emin, int sign, int po
 	 * subtracted to round the number to the target precision.
 	 */
 	if (bits < LDBL_MANT_DIG) {
-		bias = copysignl(scalbn(1, 2*LDBL_MANT_DIG - bits - 1), y);
-		frac = fmodl(y, scalbn(1, LDBL_MANT_DIG - bits));
-		y -= frac;
-		y += bias;
+		bias = copysignl(scalbn(1, 2*LDBL_MANT_DIG - bits - 1), result);
+		frac = fmodl(result, scalbn(1, LDBL_MANT_DIG - bits));
+		result -= frac;
+		result += bias;
 	}
 
 	/*
@@ -531,18 +518,18 @@ static long double decfloat(FILE *f, int c, int bits, int emin, int sign, int po
 	 * - If next digit > 500000000: round up (add 0.75 to bias toward up)
 	 * - If next digit = 500000000: round to even (add 0.5, or 0.75 if more digits)
 	 */
-	if (((a + i) & MASK) != z) {
-		uint32_t t = x[(a + i) & MASK];  /* Next billion-based digit */
+	if (((start + i) & MASK) != end) {
+		uint32_t next_digit = digits[(start + i) & MASK];  /* Next billion-based digit */
 
-		if (t < 500000000 && (t || ((a + i + 1) & MASK) != z)) {
+		if (next_digit < 500000000 && (next_digit || ((start + i + 1) & MASK) != end)) {
 			/* Less than half, or exactly half with more digits following */
 			frac += 0.25 * sign;
-		} else if (t > 500000000) {
+		} else if (next_digit > 500000000) {
 			/* More than half - round up */
 			frac += 0.75 * sign;
-		} else if (t == 500000000) {
+		} else if (next_digit == 500000000) {
 			/* Exactly half */
-			if (((a + i + 1) & MASK) == z) {
+			if (((start + i + 1) & MASK) == end) {
 				/* Exactly half with no more digits - round to even */
 				frac += 0.5 * sign;
 			} else {
@@ -558,8 +545,8 @@ static long double decfloat(FILE *f, int c, int bits, int emin, int sign, int po
 	}
 
 	/* Apply the fractional rounding adjustment */
-	y += frac;
-	y -= bias;
+	result += frac;
+	result -= bias;
 
 	/*
 	 * Handle overflow and final range checking
@@ -568,13 +555,13 @@ static long double decfloat(FILE *f, int c, int bits, int emin, int sign, int po
 	 * the transition between normal and denormal numbers.
 	 */
 	if ((e2 + LDBL_MANT_DIG & INT_MAX) > emax - 5) {
-		if (fabsl(y) >= 2 / LDBL_EPSILON) {
+		if (fabsl(result) >= 2 / LDBL_EPSILON) {
 			/* Number is too large - might need to adjust */
 			if (denormal && bits == LDBL_MANT_DIG + e2 - emin) {
 				denormal = 0;  /* Actually not denormal after all */
 			}
-			y *= 0.5;  /* Scale down */
-			e2++;       /* Adjust exponent */
+			result *= 0.5;  /* Scale down */
+			e2++;           /* Adjust exponent */
 		}
 
 		/* Check for overflow or denormal underflow */
@@ -584,7 +571,7 @@ static long double decfloat(FILE *f, int c, int bits, int emin, int sign, int po
 	}
 
 	/* Combine mantissa and exponent to get final result */
-	return scalbnl(y, e2);
+	return scalbnl(result, e2);
 }
 
 /*
@@ -608,8 +595,8 @@ static long double decfloat(FILE *f, int c, int bits, int emin, int sign, int po
  */
 static long double hexfloat(FILE *f, int bits, int emin, int sign, int pok)
 {
-	uint32_t x = 0;           /* Integer part of mantissa */
-	long double y = 0;        /* Fractional part of mantissa */
+	uint32_t mantissa = 0;    /* Integer part of mantissa */
+	long double frac_part = 0; /* Fractional part of mantissa */
 	long double scale = 1;    /* Scale factor for fractional digits */
 	long double bias = 0;     /* Rounding bias */
 	int gottail = 0;          /* Found digits beyond precision limit */
@@ -618,29 +605,29 @@ static long double hexfloat(FILE *f, int bits, int emin, int sign, int pok)
 	long long rp = 0;         /* Radix point position */
 	long long dc = 0;         /* Digit count */
 	long long e2 = 0;         /* Binary exponent from 'p' notation */
-	int d;                    /* Current hex digit value */
-	int c;                    /* Current character */
+	int digit;                /* Current hex digit value */
+	int ch;                   /* Current character */
 
-	c = shgetc(f);
+	ch = shgetc(f);
 
 	/* Skip leading zeros - they don't affect the value */
-	for (; c == '0'; c = shgetc(f)) {
+	for (; ch == '0'; ch = shgetc(f)) {
 		gotdig = 1;
 	}
 
 	/* Handle leading decimal point */
-	if (c == '.') {
+	if (ch == '.') {
 		gotrad = 1;
-		c = shgetc(f);
+		ch = shgetc(f);
 		/* Count zeros after decimal point before first significant digit */
-		for (rp = 0; c == '0'; c = shgetc(f), rp--) {
+		for (rp = 0; ch == '0'; ch = shgetc(f), rp--) {
 			gotdig = 1;
 		}
 	}
 
 	/* Main hex digit parsing loop */
-	for (; (c - '0' < 10U) || ((c|32) - 'a' < 6U) || c == '.'; c = shgetc(f)) {
-		if (c == '.') {
+	for (; (ch - '0' < 10U) || ((ch|32) - 'a' < 6U) || ch == '.'; ch = shgetc(f)) {
+		if (ch == '.') {
 			/* Handle decimal point */
 			if (gotrad) break;  /* Second decimal point - stop */
 			rp = dc;            /* Record position of decimal point */
@@ -648,21 +635,21 @@ static long double hexfloat(FILE *f, int bits, int emin, int sign, int pok)
 		} else {
 			/* Process hex digit */
 			gotdig = 1;
-			if (c > '9') {
-				d = (c|32) + 10 - 'a';  /* Convert 'a'-'f' to 10-15 */
+			if (ch > '9') {
+				digit = (ch|32) + 10 - 'a';  /* Convert 'a'-'f' to 10-15 */
 			} else {
-				d = c - '0';            /* Convert '0'-'9' to 0-9 */
+				digit = ch - '0';            /* Convert '0'-'9' to 0-9 */
 			}
 
 			if (dc < 8) {
 				/* First 8 hex digits go into integer part */
-				x = x * 16 + d;
+				mantissa = mantissa * 16 + digit;
 			} else if (dc < LDBL_MANT_DIG/4 + 1) {
 				/* Additional digits go into fractional part */
-				y += d * (scale /= 16);
-			} else if (d && !gottail) {
+				frac_part += digit * (scale /= 16);
+			} else if (digit && !gottail) {
 				/* Beyond precision - just set a flag for rounding */
-				y += 0.5 * scale;
+				frac_part += 0.5 * scale;
 				gottail = 1;
 			}
 			dc++;
@@ -686,12 +673,12 @@ static long double hexfloat(FILE *f, int bits, int emin, int sign, int pok)
 
 	/* Pad integer part to 8 hex digits (32 bits) */
 	while (dc < 8) {
-		x *= 16;
+		mantissa *= 16;
 		dc++;
 	}
 
 	/* Parse optional binary exponent (e.g., "p123" or "P-45") */
-	if ((c|32) == 'p') {
+	if ((ch|32) == 'p') {
 		e2 = scan_exponent(f, pok);
 		if (e2 == LLONG_MIN) {
 			if (pok) {
@@ -710,7 +697,7 @@ static long double hexfloat(FILE *f, int bits, int emin, int sign, int pok)
 	e2 += 4 * rp - 32;
 
 	/* Handle zero case */
-	if (!x) return sign * 0.0;
+	if (!mantissa) return sign * 0.0;
 
 	/* Check for overflow/underflow */
 	if (e2 > -emin) {
@@ -725,18 +712,18 @@ static long double hexfloat(FILE *f, int bits, int emin, int sign, int pok)
 	/*
 	 * Normalize the mantissa
 	 *
-	 * We need the most significant bit of x to be in the top bit position
+	 * We need the most significant bit of mantissa to be in the top bit position
 	 * (0x80000000). If it's not, we shift left and adjust the exponent.
 	 */
-	while (x < 0x80000000) {
-		if (y >= 0.5) {
+	while (mantissa < 0x80000000) {
+		if (frac_part >= 0.5) {
 			/* Fractional part >= 0.5, so carry into integer part */
-			x += x + 1;  /* x = x*2 + 1 */
-			y += y - 1;  /* y = y*2 - 1 */
+			mantissa += mantissa + 1;  /* mantissa = mantissa*2 + 1 */
+			frac_part += frac_part - 1;  /* frac_part = frac_part*2 - 1 */
 		} else {
 			/* No carry needed */
-			x += x;      /* x = x*2 */
-			y += y;      /* y = y*2 */
+			mantissa += mantissa;      /* mantissa = mantissa*2 */
+			frac_part += frac_part;      /* frac_part = frac_part*2 */
 		}
 		e2--;  /* Adjust exponent for the left shift */
 	}
@@ -753,20 +740,20 @@ static long double hexfloat(FILE *f, int bits, int emin, int sign, int pok)
 	}
 
 	/* Round to odd if we're truncating and have fractional bits */
-	if (bits < 32 && y && !(x & 1)) {
-		x++;
-		y = 0;
+	if (bits < 32 && frac_part && !(mantissa & 1)) {
+		mantissa++;
+		frac_part = 0;
 	}
 
 	/* Apply bias, combine parts, then remove bias for proper rounding */
-	y = bias + sign * (long double)x + sign * y;
-	y -= bias;
+	frac_part = bias + sign * (long double)mantissa + sign * frac_part;
+	frac_part -= bias;
 
 	/* Check for underflow to zero */
-	if (!y) errno = ERANGE;
+	if (!frac_part) errno = ERANGE;
 
 	/* Combine mantissa and exponent */
-	return scalbnl(y, e2);
+	return scalbnl(frac_part, e2);
 }
 
 /*
@@ -791,7 +778,7 @@ long double __floatscan(FILE *f, int prec, int pok)
 	size_t i;         /* Loop counter */
 	int bits;         /* Target precision in bits */
 	int emin;         /* Minimum exponent for target type */
-	int c;            /* Current character */
+	int ch;           /* Current character */
 
 	/* Set precision parameters based on target type */
 	switch (prec) {
@@ -812,14 +799,14 @@ long double __floatscan(FILE *f, int prec, int pok)
 	}
 
 	/* Skip leading whitespace */
-	while (isspace((c = shgetc(f)))) {
+	while (isspace((ch = shgetc(f)))) {
 		/* Keep skipping */
 	}
 
 	/* Parse optional sign */
-	if (c == '+' || c == '-') {
-		sign -= 2 * (c == '-');  /* +1 for '+', -1 for '-' */
-		c = shgetc(f);
+	if (ch == '+' || ch == '-') {
+		sign -= 2 * (ch == '-');  /* +1 for '+', -1 for '-' */
+		ch = shgetc(f);
 	}
 
 	/*
@@ -830,8 +817,8 @@ long double __floatscan(FILE *f, int prec, int pok)
 	 * - "infinity" (8 characters)
 	 * - Partial matches if pok is true (for scanf)
 	 */
-	for (i = 0; i < 8 && (c|32) == "infinity"[i]; i++) {
-		if (i < 7) c = shgetc(f);
+	for (i = 0; i < 8 && (ch|32) == "infinity"[i]; i++) {
+		if (i < 7) ch = shgetc(f);
 	}
 	if (i == 3 || i == 8 || (i > 3 && pok)) {
 		/* Found "inf" or "infinity" (or partial match with pok) */
@@ -853,8 +840,8 @@ long double __floatscan(FILE *f, int prec, int pok)
 	 */
 	if (!i) {
 		/* Only check for "nan" if we didn't match any of "infinity" */
-		for (i = 0; i < 3 && (c|32) == "nan"[i]; i++) {
-			if (i < 2) c = shgetc(f);
+		for (i = 0; i < 3 && (ch|32) == "nan"[i]; i++) {
+			if (i < 2) ch = shgetc(f);
 		}
 	}
 	if (i == 3) {
@@ -866,11 +853,11 @@ long double __floatscan(FILE *f, int prec, int pok)
 
 		/* Parse NaN payload: alphanumeric characters and underscore */
 		for (i = 1; ; i++) {
-			c = shgetc(f);
-			if ((c - '0' < 10U) || (c - 'A' < 26U) || (c - 'a' < 26U) || c == '_') {
+			ch = shgetc(f);
+			if ((ch - '0' < 10U) || (ch - 'A' < 26U) || (ch - 'a' < 26U) || ch == '_') {
 				continue;  /* Valid payload character */
 			}
-			if (c == ')') return NAN;  /* End of payload */
+			if (ch == ')') return NAN;  /* End of payload */
 
 			/* Invalid character in payload */
 			shunget(f);
@@ -900,15 +887,15 @@ long double __floatscan(FILE *f, int prec, int pok)
 	 * If we see "0x" or "0X", dispatch to hexadecimal parser.
 	 * Otherwise, parse as decimal.
 	 */
-	if (c == '0') {
-		c = shgetc(f);
-		if ((c|32) == 'x') {
+	if (ch == '0') {
+		ch = shgetc(f);
+		if ((ch|32) == 'x') {
 			return hexfloat(f, bits, emin, sign, pok);
 		}
 		shunget(f);
-		c = '0';  /* Treat the '0' as start of decimal number */
+		ch = '0';  /* Treat the '0' as start of decimal number */
 	}
 
 	/* Parse as decimal floating-point number */
-	return decfloat(f, c, bits, emin, sign, pok);
+	return decfloat(f, ch, bits, emin, sign, pok);
 }
